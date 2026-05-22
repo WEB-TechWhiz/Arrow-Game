@@ -1,0 +1,560 @@
+# Arrow Nexus — Complete Implementation Plan
+
+> **Source Document**: `Thinking.docs` — deeply analyzed and converted into a phased, actionable engineering roadmap for a commercial-quality maze-navigation game.
+
+---
+
+## What Are We Building?
+
+**Arrow Nexus** is a precision maze-navigation game where the player controls a directional arrow through procedurally generated, living labyrinths. The game combines puzzle-solving, reflex gameplay, and flow-state mechanics. It targets **mobile + PC** and aims for commercial indie release.
+
+**Core Experience Goal**: *"I am mastering a living machine."*
+
+---
+
+## Technology Stack Decision
+
+| Component | Choice | Rationale |
+|---|---|---|
+| **Engine** | Unity (C#) | Best overall — fast dev, strong mobile, procedural systems, shader pipeline |
+| **Level System** | Tilemap | Efficient for 2D maze rendering, batching, GPU instancing |
+| **Backend** | Firebase | Leaderboards, daily challenges, save sync |
+| **Analytics** | Unity Analytics | Built-in, tracks player behavior for adaptive difficulty |
+| **Multiplayer** | Photon Fusion | Competitive race mode |
+| **Audio** | FMOD | Adaptive, reactive audio layers |
+| **Language** | C# | Native Unity support |
+
+> [!IMPORTANT]
+> The document recommends Unity as primary engine. Godot is a viable alternative if team prefers open-source; however, Unity's Tilemap + Shader pipeline is optimal for the circuit-board neon aesthetic described.
+
+---
+
+## Architecture Overview
+
+```mermaid
+graph TD
+    A[Input Manager] --> B[Player Arrow Controller]
+    B --> C[Collision System]
+    B --> D[Flow Momentum System]
+    C --> E[Maze Generator]
+    E --> F[Tile / Chunk Manager]
+    F --> G[Signal Node System]
+    G --> H[Game State Manager]
+    H --> I[UI / HUD Manager]
+    H --> J[Save System]
+    H --> K[Audio Engine - FMOD]
+    H --> L[FX Manager - VFX/Shaders]
+    H --> M[Adaptive Difficulty Engine]
+    M --> E
+    N[Firebase Backend] --> H
+    N --> O[Leaderboards / Daily Challenge]
+    P[Photon Fusion] --> H
+```
+
+---
+
+## Proposed Changes / Implementation
+
+All code lives in `d:\Arrow Game\`. The project uses Unity. Folder structure below is canonical Unity layout.
+
+---
+
+### PHASE 1 — Prototype (Weeks 1–4)
+
+**Goal**: Get a playable vertical slice. Arrow moves, maze exists, collisions work.
+
+---
+
+#### [NEW] `Assets/Scripts/Core/InputManager.cs`
+
+Handles all player input — keyboard (WASD/Arrow Keys), Space (dash), Shift (ability), ESC (pause). Also processes mobile swipe gestures.
+
+**Key responsibilities:**
+- Poll `Input.GetKeyDown` for desktop
+- Register `Touch` events for mobile swipe detection
+- Expose `InputEvent` via C# events / UnityEvents for decoupled consumption
+- **Direction Locking**: Enforce the rule that the player cannot instantly reverse direction (e.g., can't go Left if currently moving Right). This is a core mechanic from the doc.
+
+```
+Directions: UP, DOWN, LEFT, RIGHT
+Lock Rule: newDir != opposite(currentDir)
+```
+
+---
+
+#### [NEW] `Assets/Scripts/Core/PlayerArrow.cs`
+
+The central player entity — a directional arrow / pulse entity.
+
+**Key responsibilities:**
+- Movement across Tilemap grid cells (grid-snapped movement)
+- Direction locking enforcement (delegates to InputManager event)
+- **Flow Momentum System**:
+  - Arrow gains speed while moving continuously (combo multiplier)
+  - Speed caps at a configurable max
+  - Harder to turn at high speed (turning dampening)
+  - Combo score multiplier accumulates on continuous movement
+- Dash ability (Space): Short burst forward, cooldown-gated
+- Death / respawn logic
+- Emit events: `OnDeath`, `OnComboUpdated`, `OnDash`
+
+---
+
+#### [NEW] `Assets/Scripts/Maze/MazeGenerator.cs`
+
+Procedural maze generation using **Hybrid Algorithm** as specified in the doc:
+
+```
+Recursive Backtracking
++ Cellular Automata smoothing pass
++ Weighted Path Logic (biases toward multiple routes, controlled dead ends)
+```
+
+**Generation Rules (from doc):**
+- Guarantee multiple routes from start to end
+- Controlled dead ends (not excessive)
+- Balanced tension zones (tight corridors)
+- Secret paths (low-probability hidden branches)
+- Speed sections (wide open paths for momentum)
+
+**Output**: A 2D integer grid consumed by the TileManager.
+
+---
+
+#### [NEW] `Assets/Scripts/Maze/TileManager.cs`
+
+Renders the generated maze grid onto Unity's Tilemap system.
+
+**Key responsibilities:**
+- Translate int[][] maze grid → Tilemap tiles
+- Tile types: Path, Wall, Goal Node, Hazard, Signal Node, Special
+- GPU instancing for performance
+- Chunk loading: only load visible chunks (critical for large procedural mazes)
+- Object pooling for tiles that animate or move
+
+---
+
+#### [NEW] `Assets/Scripts/Core/CollisionSystem.cs`
+
+Physics and interaction layer.
+
+- Grid-based collision (not physics engine collision — purely positional for performance)
+- Tile type detection on player's next cell
+- Triggers: Wall → death, Goal → level complete, Hazard → damage/death, Signal Node → activate
+- Wall slide logic (smooth feel against walls)
+
+---
+
+#### [NEW] `Assets/Scripts/Core/CameraController.cs`
+
+- Follows player arrow smoothly
+- Zoom out during high-speed momentum (dynamic FOV)
+- Screenshake on death / danger
+- Minimap render texture camera (separate low-res camera)
+
+---
+
+### PHASE 2 — Core Gameplay (Weeks 5–12)
+
+**Goal**: Dynamic systems, hazards, UI, progression.
+
+---
+
+#### [NEW] `Assets/Scripts/Mechanics/DynamicPathway.cs`
+
+Implements the **Dynamic Pathways** mechanic:
+
+- Maze segments can Open, Close, Rotate, Collapse on timers or triggers
+- Each dynamic tile has a `PathwayState` (Open/Closed/Rotating/Collapsing)
+- Signal Nodes can control dynamic pathways
+- Rotation uses DOTween or Unity Animation for smooth tile transforms
+
+---
+
+#### [NEW] `Assets/Scripts/Mechanics/SignalNode.cs`
+
+Interactive nodes placed in the maze:
+
+| Node Type | Effect |
+|---|---|
+| Bridge Activator | Opens path bridge |
+| Trap Disabler | Disables a hazard |
+| Gravity Reverser | Flips movement axis |
+| Layout Changer | Reshuffles a maze section |
+
+- Triggered by player entering the node cell
+- Visual feedback: neon pulse animation (purple/yellow per doc color palette)
+- Cooldown system to prevent spam
+
+---
+
+#### [NEW] `Assets/Scripts/Mechanics/HazardSystem.cs`
+
+All hazard types:
+
+- **Static Hazards**: Red/orange tiles — instant death on contact
+- **Moving Hazards**: Patrol a path
+- **Timed Traps**: Activate on rhythm cycle (ties into Pulse Doors mechanic)
+- **Data Corruption Zones**: Visual glitch effect, fake walls, hidden traps
+
+---
+
+#### [NEW] `Assets/Scripts/Mechanics/PulseDoors.cs`
+
+Advanced mechanic — doors open only on rhythm cycles.
+
+- Uses a global `PulseTimer` (synced to audio beat or fixed interval)
+- Doors visually pulse before opening (audio + visual cue)
+- Player must time movement to pass through
+
+---
+
+#### [NEW] `Assets/Scripts/Mechanics/GravityChannel.cs`
+
+Changes arrow movement orientation in designated zones.
+
+- Entering a gravity channel alters the "up" direction
+- Input remapped accordingly
+- Visual indicator: tilted grid lines, colored zone
+
+---
+
+#### [NEW] `Assets/Scripts/UI/HUDManager.cs`
+
+HUD elements per the doc's `UI Philosophy: Minimal but informative`:
+
+| Element | Implementation |
+|---|---|
+| **Momentum Meter** | Filled bar that grows with continuous movement |
+| **Mini-map** | Render Texture from secondary camera |
+| **Pulse Timer** | Circular countdown synced to dynamic maze |
+| **Combo Meter** | Number + multiplier, animated on increment |
+
+---
+
+#### [NEW] `Assets/Scripts/Core/GameStateManager.cs`
+
+Central finite state machine:
+
+```
+States: MainMenu → ModeSelect → LevelLoad → Playing → Paused → LevelComplete → Death → GameOver
+```
+
+- Manages scene transitions
+- Tracks current mode (Classic / Timed Pulse / Survival Grid / Logic Core)
+- Holds session-level stats (deaths, combo, time)
+
+---
+
+#### [NEW] `Assets/Scripts/Core/SaveSystem.cs`
+
+- Local save via `PlayerPrefs` + JSON file for level progress
+- Firebase sync for leaderboards and daily challenges
+- Ghost run data (player's best path recording for replay)
+
+---
+
+#### [NEW] `Assets/Scripts/Difficulty/AdaptiveDifficultyEngine.cs`
+
+Tracks per the doc:
+
+| Signal | Tracked Metric |
+|---|---|
+| Death frequency | Deaths per level attempt |
+| Completion speed | Time to finish vs. par time |
+| Hesitation | Player idle > 1.5s = confusion signal |
+| Wrong turns | Entry into dead ends |
+
+**Adjustments made dynamically:**
+- Trap timing (slower if struggling)
+- Maze complexity (fewer branches if confused)
+- Speed requirements (lower thresholds)
+- Sends data to Unity Analytics
+
+---
+
+### PHASE 3 — Content Expansion (Weeks 13–22)
+
+**Goal**: Four game worlds, advanced mechanics, audio, optimization.
+
+---
+
+#### World Content — Level Architecture
+
+Each level follows the **Level Structure Formula** from the doc:
+
+```
+Entry Zone → Learning Area → Complexity Build-Up → Trap Layer
+→ Precision Segment → Puzzle Interaction → High-Speed Escape → Reward Chamber
+```
+
+| World | Theme | Introduces |
+|---|---|---|
+| **World 1 — Initialization** | Tutorial / onboarding | Simple corridors, basic hazards, low speed |
+| **World 2 — Signal Depths** | Intermediate | Moving walls, timing gates, route switching |
+| **World 3 — Corruption Grid** | Distortion | Fake pathways, visibility reduction, data corruption zones |
+| **World 4 — Quantum Nexus** | Advanced | Teleportation nodes, clone mechanics, dynamic topology |
+
+**Handcrafted levels required for MVP**: 20 (as specified in doc).
+
+---
+
+#### [NEW] `Assets/Scripts/Mechanics/TeleportNode.cs`
+
+- Paired nodes: entering one exits from the other
+- Visual: electric green warp effect
+- Used in World 4 — Quantum Nexus
+
+---
+
+#### [NEW] `Assets/Scripts/Mechanics/SplitPath.cs`
+
+**Clone mechanic** — player creates a duplicate arrow:
+
+- Both arrows move simultaneously with same input
+- Puzzles require both to reach separate targets
+- One can be sacrificed to trigger a switch
+- Complex sync logic: if one dies, both die (configurable per puzzle)
+
+---
+
+#### [NEW] `Assets/Scripts/Audio/AudioManager.cs`
+
+FMOD integration — adaptive audio per the doc's **Sound Layers**:
+
+| Layer | Sounds |
+|---|---|
+| Movement | Synth pulse, directional clicks, momentum hum |
+| Environment | Digital ambience, reactive echoes, signal distortion |
+| Danger | Frequency spikes, glitch bursts, bass tension |
+
+- Music intensity adapts to player speed (momentum = more intense layer)
+- Danger zones trigger frequency spikes
+- Death: glitch burst + silence recovery
+
+---
+
+#### [NEW] `Assets/Scripts/FX/FXManager.cs`
+
+Visual effects system:
+
+- **Player trail**: Cyan particle trail, intensity ∝ momentum
+- **Death explosion**: Pixel burst + screenshake
+- **Signal Node activation**: Neon ring pulse
+- **Corruption Zone**: CRT scanline shader, chromatic aberration
+- **Teleport**: Electric spiral warp
+- **Gravity Channel**: Color-tinted zone with flowing particles
+
+**Shaders** (lightweight per performance strategy):
+- Neon glow shader (emissive pulse animation)
+- Glitch/distortion shader (Data Corruption Zones)
+- Trail gradient shader (player)
+
+---
+
+#### Performance — Meeting Target FPS
+
+Per doc targets: Mobile 60fps, PC 144fps, Console 120fps.
+
+| Technique | Implementation |
+|---|---|
+| Object Pooling | All tiles, particles, hazards |
+| Chunk Loading | Only render ±2 chunks around player |
+| GPU Instancing | Tilemap rendering |
+| Lightweight Shaders | No complex raymarching |
+| Tilemap Batching | Unity Tilemap renderer batching enabled |
+
+---
+
+### PHASE 4 — Launch Preparation (Weeks 23–27)
+
+**Goal**: Polish, store deployment, monetization, analytics.
+
+---
+
+#### [NEW] `Assets/Scripts/Meta/DailyChallengeSystem.cs`
+
+- Fetches daily seed from Firebase
+- Generates deterministic procedural maze from seed
+- Special modifiers: speed multiplier, invisibility, gravity flip
+- Leaderboard per day (Firebase Realtime Database)
+
+---
+
+#### [NEW] `Assets/Scripts/Meta/GhostSystem.cs`
+
+Ghost run recording and playback:
+
+- Record: store player's path as timestamped `(cell, direction)` tuples
+- Playback: replay ghost arrow alongside live player
+- Compete against: personal best, friends, global top
+
+---
+
+#### [NEW] `Assets/Scripts/Meta/MonetizationManager.cs`
+
+Ethical monetization per doc — **cosmetics only, no pay-to-win**:
+
+| Item | Type |
+|---|---|
+| Arrow Skins | Visual reskins of player arrow |
+| Trail Effects | Different particle trails |
+| Theme Packs | Alternate color palettes for maze |
+| Seasonal Challenges | Time-limited event mazes |
+
+- Unity IAP integration
+- All gameplay-affecting content unlockable through play
+
+---
+
+#### [NEW] `Assets/Scripts/Meta/SpeedrunSystem.cs`
+
+- Timer starts on first input, stops on goal node
+- Metrics: completion time, combo efficiency, path optimization score
+- Submitted to Firebase leaderboard (World × Level × Mode)
+
+---
+
+## Game Modes Implementation
+
+| Mode | Key Mechanic | Special System |
+|---|---|---|
+| **Classic Maze** | Reach endpoint, solve logic gates | Handcrafted + procedural levels |
+| **Timed Pulse** | Maze changes every N seconds | `PulseTimer` global system, reflex focus |
+| **Survival Grid** | Endless procedural maze, increasing difficulty | `AdaptiveDifficultyEngine` drives complexity |
+| **Logic Core** | Puzzle-focused: switches, energy routing, teleports | `SignalNode`, `TeleportNode`, `SplitPath` systems |
+
+---
+
+## Player Engagement Design
+
+Per the doc's three **Engagement Pillars**:
+
+| Pillar | Implementation |
+|---|---|
+| **Curiosity** | Unreachable areas visible through gaps, secret paths with 5% spawn probability, hidden Signal Nodes |
+| **Mastery** | Ghost run comparison, combo/multiplier system, speedrun leaderboards, route memorization rewards |
+| **Tension** | Tight corridors (1-tile width), momentum risk/reward, timed traps, maze shift warnings |
+
+---
+
+## MVP Checklist (Minimum Viable Product)
+
+Per the doc's Section 26:
+
+- [ ] Procedural maze generation (Hybrid: Recursive Backtracking + Cellular Automata)
+- [ ] Arrow movement with direction locking + flow momentum
+- [ ] Goal system (reach Core Node → level complete)
+- [ ] Hazards (static, moving, timed)
+- [ ] Score system (combo × speed × path efficiency)
+- [ ] 20 handcrafted levels across 4 worlds
+- [ ] Adaptive difficulty engine
+- [ ] HUD (Momentum Meter, Minimap, Pulse Timer, Combo Meter)
+- [ ] Save system (local + Firebase)
+- [ ] Audio (FMOD adaptive layers)
+- [ ] Neon cyber-abstract visual style
+
+**Optional for V1.0:**
+- [ ] Multiplayer (Photon Fusion competitive race)
+- [ ] Cosmetic shop
+- [ ] Dynamic maze shifts in Classic mode
+- [ ] VR mode
+
+---
+
+## Risk Mitigation Plan
+
+| Risk | From Doc | Mitigation Strategy |
+|---|---|---|
+| Repetitive gameplay | Dynamic systems | 4 distinct game modes, procedural generation, daily challenges |
+| Maze frustration | Adaptive difficulty | `AdaptiveDifficultyEngine` tracks hesitation and auto-adjusts |
+| Performance issues | Tile optimization | Object pooling, chunk loading, GPU instancing from day one |
+| Weak retention | Daily challenges | Firebase daily seed system + Ghost runs + leaderboards |
+| Skill imbalance | Tutorial worlds | World 1 is a dedicated safe learning zone with no punishing hazards |
+
+---
+
+## Development Roadmap Summary
+
+```mermaid
+gantt
+    title Arrow Nexus — Development Roadmap
+    dateFormat  YYYY-MM-DD
+    section Phase 1 — Prototype
+    Input Manager           :p1a, 2026-05-12, 7d
+    Player Arrow Controller :p1b, after p1a, 7d
+    Maze Generator (Basic)  :p1c, after p1a, 10d
+    Tile Manager            :p1d, after p1c, 5d
+    Collision System        :p1e, after p1b, 5d
+    Camera Controller       :p1f, after p1b, 5d
+    section Phase 2 — Core Gameplay
+    Dynamic Pathways        :p2a, after p1f, 10d
+    Signal Nodes            :p2b, after p2a, 7d
+    Hazard System           :p2c, after p2a, 7d
+    Pulse Doors             :p2d, after p2b, 5d
+    HUD Manager             :p2e, after p2c, 7d
+    Game State Manager      :p2f, after p2e, 7d
+    Save System             :p2g, after p2f, 5d
+    Adaptive Difficulty     :p2h, after p2g, 7d
+    section Phase 3 — Content Expansion
+    World 1 Levels          :p3a, after p2h, 10d
+    World 2 Levels          :p3b, after p3a, 10d
+    World 3 + Corruption    :p3c, after p3b, 10d
+    World 4 + Quantum       :p3d, after p3c, 10d
+    Audio System (FMOD)     :p3e, after p3a, 14d
+    FX Manager + Shaders    :p3f, after p3a, 14d
+    section Phase 4 — Launch
+    Daily Challenge System  :p4a, after p3d, 7d
+    Ghost System            :p4b, after p4a, 5d
+    Monetization            :p4c, after p4a, 5d
+    Speedrun System         :p4d, after p4b, 5d
+    QA + Bug Fixing         :p4e, after p4d, 14d
+    Store Deployment        :p4f, after p4e, 7d
+```
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **Platform Priority**: Should we develop for Mobile-first, PC-first, or simultaneously? This affects input system design priority (touch vs keyboard) and performance budgets.
+
+> [!IMPORTANT]
+> **Engine Confirmation**: Do you want to use Unity (recommended) or Godot? This locks the entire tech stack before Phase 1 begins.
+
+> [!NOTE]
+> **Handcrafted vs Procedural for MVP**: The doc requires 20 handcrafted levels. Do you want these designed in a level editor (Unity Tilemap editor) or auto-generated with manual curation/override?
+
+> [!NOTE]
+> **Multiplayer Timeline**: Photon Fusion multiplayer is listed as "Future Mode." Should this be scoped into Phase 4, or deferred entirely to a post-launch update?
+
+> [!TIP]
+> **Art Assets**: Will you commission custom neon tile art, or use Unity's built-in tile assets + custom shaders to achieve the circuit-board neon aesthetic described in the doc?
+
+---
+
+## Verification Plan
+
+### After Phase 1
+- Arrow moves through a generated maze without clipping
+- Direction locking prevents instant reversal
+- Momentum system accelerates and decelerates correctly
+- Camera follows player and minimap renders
+
+### After Phase 2
+- Dynamic pathways open/close on timer and signal trigger
+- Hazards kill player and respawn logic works
+- All 4 game modes are selectable from main menu
+- Adaptive difficulty adjusts trap timing after 3+ consecutive deaths
+
+### After Phase 3
+- All 20 handcrafted levels are completable
+- FMOD audio layers react to player speed and danger
+- Corruption Zone shader applies visual glitch correctly
+- 60fps maintained on target mobile hardware
+
+### After Phase 4
+- Daily challenge seeds are fetched from Firebase and deterministic
+- Leaderboard entries are submitted and displayed
+- In-app purchases flow works in test environment
+- Ghost playback runs alongside live player correctly
